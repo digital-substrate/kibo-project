@@ -50,7 +50,7 @@ templates = "2"                      # the template pack's line
 manifests = ["../templates/features.json"]   # optional: the project's own features
 
 [target.cpp]
-features = ["TestApp", "AttachmentPool"]
+features = ["TestApp"]
 output = "cpp/generated"
 
 [target.python]
@@ -67,14 +67,14 @@ several places names each target for what it produces, and states its language:
 ```toml
 [target.infrastructure]
 language = "cpp"
-features = ["Base", "Attachments", "AttachmentPool", "Pool"]
+features = ["Base", "Attachments", "Pool"]
 output = "src/rei"
 
-[target.editor]                      # two files the application target compiles
+[target.client]                      # the pool's client side, for another binary
 language = "cpp"
-features = ["PythonDefinitions"]
-with_requirements = false            # Base and Attachments are the infrastructure's
-output = "RaptorEditor/RaptorEditor"
+features = ["PoolRemote"]
+with_requirements = false            # Base is the infrastructure's
+output = "client/generated"
 
 [target.scripts]
 language = "python"
