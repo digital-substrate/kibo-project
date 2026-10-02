@@ -92,6 +92,19 @@ output = "RaptorEditor/RaptorEditor/Scripts"
 - A project's own manifest follows the pack's format; its templates sit beside it, in
   `<manifest dir>/<target>/`. A feature name the pack already declares is refused.
 
+How a static name is spelled where kibo projects it to snake_case — a Python field, method,
+parameter or module, the packages' directories — follows one rule (`vec3Curves` →
+`vec3_curves`, `docUInt8` → `doc_uint8`, `render2DAttributes` → `render_2d_attributes`). Two
+names that land on one spelling stop the generation. A project says what only its author knows:
+
+```toml
+[names]
+atoms = ["IPv4", "YCoCg"]            # never split: IPv4Address -> ipv4_address
+
+[names.rename]
+"f_E" = "f_enum"                     # a whole name, spelled as written here
+```
+
 ## Where the generator comes from
 
 | | |

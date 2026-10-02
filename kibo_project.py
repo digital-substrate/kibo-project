@@ -63,6 +63,20 @@ class Project:
     manifests: list[Path] = field(default_factory=list)
     targets: dict[str, Target] = field(default_factory=dict)
     into: Path | None = None
+    # How a static name is spelled where kibo projects it to snake_case: the words never split,
+    # and the names spelled as the author wants (`[names]` in the project file).
+    atoms: list[str] = field(default_factory=list)
+    renames: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def naming(self) -> list[str]:
+        """The naming of the project, as kibo's arguments."""
+        arguments: list[str] = []
+        for atom in self.atoms:
+            arguments += ["--atom", atom]
+        for name, spelled in self.renames.items():
+            arguments += ["--rename", f"{name}={spelled}"]
+        return arguments
 
     @property
     def root(self) -> Path:
@@ -131,6 +145,15 @@ def load_project(path: Path) -> Project:
         )
     if not project.targets:
         raise ProjectError(f"{path}: no [target.*] section")
+    names = data.get("names", {})
+    if not isinstance(names, dict):
+        raise ProjectError(f"{path}: [names] must be a table")
+    atoms, renames = names.get("atoms", []), names.get("rename", {})
+    if not isinstance(atoms, list) or not all(isinstance(a, str) and a for a in atoms):
+        raise ProjectError(f"{path}: [names].atoms must be a list of words")
+    if not isinstance(renames, dict) or not all(isinstance(v, str) and v for v in renames.values()):
+        raise ProjectError(f"{path}: [names.rename] maps a DSM name to the snake_case it takes")
+    project.atoms, project.renames = list(atoms), dict(renames)
     return project
 
 
@@ -322,13 +345,14 @@ def assemble(project: Project) -> tuple[Path, bytes]:
     return path, bytes(definitions.encode().encoded())
 
 
-def render(jar: Path, target: Target, dsm: Path, templates: list[Path], output: Path) -> None:
+def render(jar: Path, target: Target, dsm: Path, templates: list[Path], output: Path,
+           naming: list[str]) -> None:
     output.mkdir(parents=True, exist_ok=True)
     for template in templates:
         # Run beside the .dsm.json, so that the banner kibo writes names it relative to the
         # project, the same on every machine.
         result = subprocess.run(["java", "-jar", str(jar), "-c", target.language, "-n", target.infrastructure,
-                                 "-d", dsm.name, "-t", str(template), "-o", str(output)],
+                                 "-d", dsm.name, "-t", str(template), "-o", str(output), *naming],
                                 cwd=dsm.parent, capture_output=True, text=True)
         if result.returncode != 0:
             raise ProjectError(f"kibo failed on {template.name}:\n{result.stderr or result.stdout}")
@@ -352,8 +376,8 @@ def generate_target(project: Project, pack: Pack, jar: Path, dsm: Path, encoded:
         if project.root.is_relative_to(sources):
             raise ProjectError(f"[target.{target.name}] clean would empty {sources}, which holds the project")
         shutil.rmtree(sources, ignore_errors=True)
-    render(jar, target, dsm, [t for t in templates if t.name not in at_root], sources)
-    render(jar, target, dsm, [t for t in templates if t.name in at_root], target.output)
+    render(jar, target, dsm, [t for t in templates if t.name not in at_root], sources, project.naming)
+    render(jar, target, dsm, [t for t in templates if t.name in at_root], target.output, project.naming)
 
     resources = layout.get("resources")
     if resources and carried(resources):
