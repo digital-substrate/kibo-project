@@ -27,14 +27,16 @@ Status: in development, for the kibo 2 line.
 ## Usage
 
 ```bash
-python3 kibo_project.py generate [kibo.toml] [--target NAME ...] [--definitions PATH]
+python3 kibo_project.py generate [kibo.toml] [--target NAME ...] [--definitions PATH] [--into DIR]
 python3 kibo_project.py plan     [kibo.toml] [--definitions PATH]
 ```
 
 `plan` shows the jar and the pack it found and, per target, the features it renders and
 every template with where it lands, without writing anything. `--definitions` renders
 another model than the project's, for one run: a test programme checked against a real
-project's model, for instance.
+project's model, for instance. `--into` renders into another directory, each output keeping
+its place relative to the project, and leaves the project untouched: two renderings, before
+and after a change, can then be compared.
 
 ## The project file
 
