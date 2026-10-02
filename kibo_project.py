@@ -7,7 +7,7 @@ reads it and drives the two components it does not replace: dsviper, which assem
 into definitions, and the kibo jar, which renders the template pack. Where the pack's output
 lands, and how the definitions are embedded, the pack declares in its features.json.
 
-    kibo_project.py generate [kibo.toml] [--target NAME ...] [--definitions PATH]
+    kibo_project.py generate [kibo.toml] [--target NAME ...] [--definitions PATH] [--into DIR]
     kibo_project.py plan     [kibo.toml] [--definitions PATH]
 """
 from __future__ import annotations
@@ -62,10 +62,28 @@ class Project:
     kibo_line: int | None = None
     manifests: list[Path] = field(default_factory=list)
     targets: dict[str, Target] = field(default_factory=dict)
+    into: Path | None = None
 
     @property
     def root(self) -> Path:
         return self.path.parent
+
+    @property
+    def workdir(self) -> Path:
+        """Where the outputs and the .dsm.json go: the project, or the directory it is rendered into."""
+        return self.into or self.root
+
+
+def relocate(project: Project, into: Path) -> None:
+    """Render into another directory, the outputs keeping their place relative to the project:
+    two renderings can then be compared without touching the working tree."""
+    into = into.resolve()
+    for target in project.targets.values():
+        if not target.output.is_relative_to(project.root):
+            raise ProjectError(f"[target.{target.name}] writes outside the project ({target.output}), "
+                               f"so it cannot be rendered into {into}")
+        target.output = into / target.output.relative_to(project.root)
+    project.into = into
 
 
 def load_project(path: Path) -> Project:
@@ -298,7 +316,8 @@ def assemble(project: Project) -> tuple[Path, bytes]:
         raise ProjectError("the definitions do not parse:\n" + "\n".join(f"  {e!r}" for e in report.errors()))
     if dsm is None or definitions is None:
         raise ProjectError("the definitions parsed to nothing")
-    path = project.root / f"{project.infrastructure}.dsm.json"
+    project.workdir.mkdir(parents=True, exist_ok=True)
+    path = project.workdir / f"{project.infrastructure}.dsm.json"
     path.write_text(dsm.json_encode())
     return path, bytes(definitions.encode().encoded())
 
@@ -366,7 +385,7 @@ def generate(project: Project, only: list[str]) -> None:
     print(f"kibo: {jar.name}   templates: {pack.root}")
     dsm, encoded = assemble(project)
     for target in targets:
-        print(f"** {target.name} -> {os.path.relpath(target.output, Path.cwd())}")
+        print(f"** {target.name} -> {os.path.relpath(target.output, project.workdir)}")
         generate_target(project, pack, jar, dsm, encoded, target)
 
 
@@ -398,11 +417,16 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("project", nargs="?", default="kibo.toml", type=Path)
         if name == "generate":
             command.add_argument("--target", action="append", default=[], help="a target's name; repeatable")
+        if name == "generate":
+            command.add_argument("--into", type=Path,
+                                 help="render into this directory instead, leaving the project untouched")
         command.add_argument("--definitions", type=Path,
                              help="render another model than the project's, a file or a folder of definitions")
     arguments = parser.parse_args(argv)
     try:
         project = load_project(arguments.project)
+        if getattr(arguments, "into", None):
+            relocate(project, arguments.into)
         if arguments.definitions:
             project.definitions = arguments.definitions.resolve()
         if arguments.command == "generate":
