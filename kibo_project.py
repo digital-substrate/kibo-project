@@ -1,0 +1,419 @@
+#!/usr/bin/env python3
+"""Generate a project's code from its project file.
+
+A project states its generation once, in a TOML file beside its DSM: the definitions, the
+infrastructure name, the features per target, and where each target's output goes. This tool
+reads it and drives the two components it does not replace: dsviper, which assembles the DSM
+into definitions, and the kibo jar, which renders the template pack. Where the pack's output
+lands, and how the definitions are embedded, the pack declares in its features.json.
+
+    kibo_project.py generate [kibo.toml] [--target NAME ...] [--definitions PATH]
+    kibo_project.py plan     [kibo.toml] [--definitions PATH]
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import zlib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:                                  # Python 3.10
+    import tomli as tomllib                                  # type: ignore[no-redef]
+
+VERSION = "0.1.0"
+TARGETS = ("cpp", "python", "typescript")
+HERE = Path(__file__).resolve().parent
+Table = dict[str, Any]
+
+
+class ProjectError(Exception):
+    """A project that cannot be generated, with what to change."""
+
+
+# MARK: - Project file
+
+@dataclass
+class Target:
+    name: str
+    language: str
+    features: list[str]
+    output: Path
+    infrastructure: str
+    clean: bool = False
+    with_requirements: bool = True
+
+
+@dataclass
+class Project:
+    path: Path
+    definitions: Path
+    infrastructure: str
+    templates_line: int
+    kibo_line: int | None = None
+    manifests: list[Path] = field(default_factory=list)
+    targets: dict[str, Target] = field(default_factory=dict)
+
+    @property
+    def root(self) -> Path:
+        return self.path.parent
+
+
+def load_project(path: Path) -> Project:
+    path = path.resolve()
+    if not path.is_file():
+        raise ProjectError(f"{path}: no project file")
+    with path.open("rb") as stream:
+        data = tomllib.load(stream)
+    root = path.parent
+
+    def section(name: str) -> Table:
+        value = data.get(name)
+        if not isinstance(value, dict):
+            raise ProjectError(f"{path}: [{name}] is missing")
+        return value
+
+    def required(table: Table, key: str, where: str) -> Any:
+        if key not in table:
+            raise ProjectError(f"{path}: {where}.{key} is missing")
+        return table[key]
+
+    project_table, generator = section("project"), section("generator")
+    infrastructure = str(required(project_table, "infrastructure", "[project]"))
+    project = Project(
+        path=path,
+        definitions=(root / str(required(project_table, "definitions", "[project]"))).resolve(),
+        infrastructure=infrastructure,
+        templates_line=int(str(required(generator, "templates", "[generator]"))),
+        kibo_line=int(str(generator["kibo"])) if "kibo" in generator else None,
+        manifests=[(root / str(m)).resolve() for m in generator.get("manifests", [])],
+    )
+    for name, table in data.get("target", {}).items():
+        # A target is named for what it produces; one named after a language needs no more.
+        language = str(table.get("language", name))
+        if language not in TARGETS:
+            raise ProjectError(f"{path}: [target.{name}] needs a language ({', '.join(TARGETS)})")
+        project.targets[name] = Target(
+            name=name,
+            language=language,
+            features=list(required(table, "features", f"[target.{name}]")),
+            output=(root / str(required(table, "output", f"[target.{name}]"))).resolve(),
+            infrastructure=str(table.get("infrastructure", infrastructure)),
+            clean=bool(table.get("clean", False)),
+            with_requirements=bool(table.get("with_requirements", True)),
+        )
+    if not project.targets:
+        raise ProjectError(f"{path}: no [target.*] section")
+    return project
+
+
+# MARK: - The generator: kibo and the template pack
+
+Version = tuple[int, int, int]
+
+
+def _version(text: str) -> Version | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+    return (int(match[1]), int(match[2]), int(match[3])) if match else None
+
+
+def _dotted(version: Version) -> str:
+    return ".".join(map(str, version))
+
+
+def find_kibo(floor: Version, line: int | None) -> Path:
+    """The newest jar at or above the pack's floor, and of the project's line if it pins one:
+    KIBO_JAR, else those beside this tool, else those of a sibling kibo checkout."""
+    if os.environ.get("KIBO_JAR"):
+        candidates = [Path(os.environ["KIBO_JAR"])]
+    else:
+        candidates = [*HERE.glob("kibo-*.jar"), *(HERE.parent / "kibo" / "target").glob("kibo-*.jar")]
+    eligible: list[tuple[Version, Path]] = []
+    for jar in candidates:
+        version = _version(jar.name) if re.fullmatch(r"kibo-\d+\.\d+\.\d+\.jar", jar.name) else None
+        if version and version >= floor and (line is None or version[0] == line) and jar.is_file():
+            eligible.append((version, jar.resolve()))
+    if not eligible:
+        wanted = f">={_dotted(floor)}" + (f", line {line}" if line is not None else "")
+        tried = os.environ.get("KIBO_JAR") or f"{HERE}/kibo-*.jar, {HERE.parent}/kibo/target/kibo-*.jar"
+        raise ProjectError(f"no kibo jar {wanted} (tried {tried})")
+    return max(eligible)[1]
+
+
+def find_templates(line: int) -> Path:
+    """The pack of the required line: KIBO_TEMPLATES, else templates/ beside this tool's
+    folder, else a sibling kibo-template-viper checkout."""
+    if os.environ.get("KIBO_TEMPLATES"):
+        candidates = [Path(os.environ["KIBO_TEMPLATES"])]
+    else:
+        candidates = [HERE.parent / "templates", HERE.parent / "kibo-template-viper"]
+    for pack in candidates:
+        if not (pack / "features.json").is_file():
+            continue
+        stamps = {s for stg in pack.glob("*/*.stg")
+                  for s in re.findall(r"kibo-template-viper (\d+\.\d+\.\d+)", stg.read_text())}
+        if len(stamps) > 1:
+            raise ProjectError(f"{pack}: its templates disagree on their version: {', '.join(sorted(stamps))}")
+        version = _version(next(iter(stamps))) if stamps else None
+        if version and version[0] == line:
+            return pack.resolve()
+        if version:
+            raise ProjectError(f"{pack}: template pack {'.'.join(map(str, version))}, line {line} required")
+    raise ProjectError(f"no template pack found (tried {', '.join(map(str, candidates))})")
+
+
+# MARK: - Features
+
+class Pack:
+    """The pack's manifest, with the project's own manifests added."""
+
+    def __init__(self, root: Path, extra: list[Path]):
+        self.root = root
+        self.manifest = json.loads((root / "features.json").read_text())
+        self.extra = [(m, json.loads(m.read_text())) for m in extra]
+
+    @property
+    def kibo_floor(self) -> Version:
+        declared = str(self.manifest.get("generator", {}).get("kibo", ""))
+        floor = _version(declared) if declared.startswith(">=") else None
+        if floor is None:
+            raise ProjectError(f"{self.root}/features.json: generator.kibo does not declare the kibo floor "
+                               f"(\">=X.Y.Z\"), found {declared!r}")
+        return floor
+
+    def layout(self, target: str) -> Table:
+        layout: Table = self.manifest.get("layout", {}).get(target, {})
+        return layout
+
+    def _features(self, target: str) -> dict[str, tuple[Table, Path]]:
+        features = {name: (spec, self.root / target)
+                    for name, spec in self.manifest.get(target, {}).items()}
+        for path, manifest in self.extra:
+            for name, spec in manifest.get(target, {}).items():
+                if name in features:
+                    raise ProjectError(f"{path} declares {name!r}, which the pack already declares")
+                features[name] = (spec, path.parent / target)
+        return features
+
+    def closure(self, language: str, wanted: list[str]) -> list[str]:
+        """The features `wanted` needs, dependencies first, each once."""
+        features = self._features(language)
+        ordered: list[str] = []
+
+        def visit(name: str, path: tuple[str, ...]) -> None:
+            if name in path:
+                raise ProjectError(f"a cycle in the features: {' -> '.join(path + (name,))}")
+            if name in ordered:
+                return
+            if name not in features:
+                raise ProjectError(f"no feature {name!r} for {language} (known: {', '.join(sorted(features))})")
+            for need in features[name][0].get("requires", []):
+                visit(need, path + (name,))
+            ordered.append(name)
+
+        for name in wanted:
+            visit(name, ())
+        return ordered
+
+    def templates(self, language: str, rendered: list[str]) -> list[Path]:
+        """The .stg files of the features rendered, in order, each once."""
+        features = self._features(language)
+        out: list[Path] = []
+        for name in rendered:
+            spec, folder = features[name]
+            for stg in spec["templates"]:
+                template = folder / stg
+                if not template.is_file():
+                    raise ProjectError(f"{name} names {stg}, absent from {folder}")
+                if template not in out:
+                    out.append(template)
+        return out
+
+    def rendered(self, project: Project, target: Target) -> list[str]:
+        """The features a target renders: the closure of what it asks for, or, with
+        `with_requirements = false`, only what it asks for -- provided another target of the
+        project renders the rest for the same infrastructure, so nothing is left out unsaid."""
+        closure = self.closure(target.language, target.features)
+        if target.with_requirements:
+            return closure
+        own = [name for name in closure if name in target.features]
+        for need in (name for name in closure if name not in target.features):
+            if not any(other is not target and other.language == target.language
+                       and other.infrastructure == target.infrastructure and other.with_requirements
+                       and need in self.closure(other.language, other.features)
+                       for other in project.targets.values()):
+                raise ProjectError(f"[target.{target.name}] leaves {need!r} to another target, and no "
+                                   f"{target.language} target for {target.infrastructure} renders it")
+        return own
+
+
+# MARK: - Embedded definitions
+
+# Each encoding opens with the line kibo puts first in what it renders: which DSM, by which
+# generator. The definitions are generated as much as the code that decodes them.
+
+def _cpp_bytes(encoded: bytes, layout: Table, infrastructure: str, provenance: str) -> str:
+    guard = Path(layout["path"].format(infrastructure=infrastructure)).stem
+    symbol = layout["symbol"].format(infrastructure=infrastructure)
+    lines = [", ".join(f"0x{b:02x}" for b in encoded[i:i + 12]) for i in range(0, len(encoded), 12)]
+    return (f"// {provenance}\n\n#ifndef {guard}_hpp\n#define {guard}_hpp\n\n#include <cstddef>\n\n"
+            f"inline constexpr unsigned char {symbol}[] = {{\n " + ",\n ".join(lines) + "\n};\n\n#endif\n")
+
+
+def _python_base64_zlib(encoded: bytes, layout: Table, infrastructure: str, provenance: str) -> str:
+    return f"# {provenance}\n\n{layout['symbol']} = {base64.b64encode(zlib.compress(encoded))!r}\n"
+
+
+def _typescript_base64(encoded: bytes, layout: Table, infrastructure: str, provenance: str) -> str:
+    return f'// {provenance}\n\nexport const {layout["symbol"]} = "{base64.b64encode(encoded).decode("ascii")}";\n'
+
+
+ENCODINGS = {
+    "cpp-bytes": _cpp_bytes,
+    "python-base64-zlib": _python_base64_zlib,
+    "typescript-base64": _typescript_base64,
+}
+
+
+# MARK: - Generation
+
+def assemble(project: Project) -> tuple[Path, bytes]:
+    """The DSM as the .dsm.json kibo reads, written beside the project file, and the encoded
+    definitions to embed. The file is an intermediate a project does not commit; it is kept so
+    that what the banners name exists, and so kibo can be rerun by hand on it."""
+    from dsviper import DSMBuilder
+    if not project.definitions.exists():
+        raise ProjectError(f"{project.definitions}: no definitions")
+    report, dsm, definitions = DSMBuilder.assemble(str(project.definitions)).parse()
+    if report.has_error():
+        raise ProjectError("the definitions do not parse:\n" + "\n".join(f"  {e!r}" for e in report.errors()))
+    if dsm is None or definitions is None:
+        raise ProjectError("the definitions parsed to nothing")
+    path = project.root / f"{project.infrastructure}.dsm.json"
+    path.write_text(dsm.json_encode())
+    return path, bytes(definitions.encode().encoded())
+
+
+def render(jar: Path, target: Target, dsm: Path, templates: list[Path], output: Path) -> None:
+    output.mkdir(parents=True, exist_ok=True)
+    for template in templates:
+        # Run beside the .dsm.json, so that the banner kibo writes names it relative to the
+        # project, the same on every machine.
+        result = subprocess.run(["java", "-jar", str(jar), "-c", target.language, "-n", target.infrastructure,
+                                 "-d", dsm.name, "-t", str(template), "-o", str(output)],
+                                cwd=dsm.parent, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise ProjectError(f"kibo failed on {template.name}:\n{result.stderr or result.stdout}")
+
+
+def generate_target(project: Project, pack: Pack, jar: Path, dsm: Path, encoded: bytes, target: Target) -> None:
+    layout = pack.layout(target.language)
+    fill = {"infrastructure": target.infrastructure}
+    sources = target.output / layout.get("sources", "").format(**fill)
+    at_root = set(layout.get("root", []))
+    rendered = pack.rendered(project, target)
+    templates = pack.templates(target.language, rendered)
+
+    def carried(part: Table) -> bool:
+        # What the pack writes beside the templates goes with the feature that reads it.
+        return "with" not in part or part["with"] in rendered
+
+    if target.clean:
+        # The sources directory belongs to the generator: emptying it is what removes the files
+        # of a type the definitions no longer declare. Never the project's own directory.
+        if project.root.is_relative_to(sources):
+            raise ProjectError(f"[target.{target.name}] clean would empty {sources}, which holds the project")
+        shutil.rmtree(sources, ignore_errors=True)
+    render(jar, target, dsm, [t for t in templates if t.name not in at_root], sources)
+    render(jar, target, dsm, [t for t in templates if t.name in at_root], target.output)
+
+    resources = layout.get("resources")
+    if resources and carried(resources):
+        encoding = ENCODINGS.get(resources["encoding"])
+        if encoding is None:
+            raise ProjectError(f"the pack asks for the encoding {resources['encoding']!r}, "
+                               f"which this tool does not know ({', '.join(ENCODINGS)})")
+        provenance = f"Generated from {dsm.name} by kibo-project {VERSION}. Do not edit by hand."
+        (sources / resources["path"].format(**fill)).write_text(
+            encoding(encoded, resources, target.infrastructure, provenance))
+
+    runtime = layout.get("runtime")
+    if runtime and carried(runtime):
+        destination = sources / runtime["to"]
+        shutil.rmtree(destination, ignore_errors=True)
+        shutil.copytree(pack.root / runtime["from"], destination,
+                        ignore=shutil.ignore_patterns(*runtime.get("exclude", [])))
+
+
+def generate(project: Project, only: list[str]) -> None:
+    pack = Pack(find_templates(project.templates_line), project.manifests)
+    jar = find_kibo(pack.kibo_floor, project.kibo_line)
+    missing = [t for t in only if t not in project.targets]
+    if missing:
+        raise ProjectError(f"{project.path}: no [target.{missing[0]}] (targets: {', '.join(project.targets)})")
+    targets = [project.targets[t] for t in (only or project.targets)]
+    for target in targets:
+        pack.rendered(project, target)
+    print(f"kibo: {jar.name}   templates: {pack.root}")
+    dsm, encoded = assemble(project)
+    for target in targets:
+        print(f"** {target.name} -> {os.path.relpath(target.output, Path.cwd())}")
+        generate_target(project, pack, jar, dsm, encoded, target)
+
+
+def plan(project: Project) -> None:
+    pack = Pack(find_templates(project.templates_line), project.manifests)
+    jar = find_kibo(pack.kibo_floor, project.kibo_line)
+    rendered = {name: pack.rendered(project, target) for name, target in project.targets.items()}
+    print(f"project:        {project.path}")
+    print(f"definitions:    {project.definitions}")
+    print(f"kibo:           {jar}")
+    print(f"templates:      {pack.root}")
+    for target in project.targets.values():
+        layout = pack.layout(target.language)
+        print(f"[{target.name}] {target.language} -n {target.infrastructure} -> {target.output}")
+        print(f"    features: {', '.join(rendered[target.name])}")
+        for template in pack.templates(target.language, rendered[target.name]):
+            where = "root" if template.name in set(layout.get("root", [])) else "sources"
+            base = pack.root if template.is_relative_to(pack.root) else project.root
+            shown = template.relative_to(base) if template.is_relative_to(base) else template
+            print(f"    {str(shown):<40} {where}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--version", action="version", version=f"kibo-project {VERSION}")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name, help_ in (("generate", "render every target, or those named"), ("plan", "show what generate would do")):
+        command = commands.add_parser(name, help=help_)
+        command.add_argument("project", nargs="?", default="kibo.toml", type=Path)
+        if name == "generate":
+            command.add_argument("--target", action="append", default=[], help="a target's name; repeatable")
+        command.add_argument("--definitions", type=Path,
+                             help="render another model than the project's, a file or a folder of definitions")
+    arguments = parser.parse_args(argv)
+    try:
+        project = load_project(arguments.project)
+        if arguments.definitions:
+            project.definitions = arguments.definitions.resolve()
+        if arguments.command == "generate":
+            generate(project, arguments.target)
+        else:
+            plan(project)
+    except ProjectError as error:
+        print(f"kibo-project: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
