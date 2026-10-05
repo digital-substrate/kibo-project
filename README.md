@@ -109,8 +109,12 @@ atoms = ["IPv4", "YCoCg"]            # never split: IPv4Address -> ipv4_address
 
 | | |
 |---|---|
-| kibo jar | `KIBO_JAR`; else `kibo-*.jar` beside this script; else `../kibo/target/kibo-*.jar` |
-| template pack | `KIBO_TEMPLATES`; else `../templates`; else `../kibo-template-viper` |
+| kibo jar | `KIBO_JAR`; else `kibo-*.jar` beside this script, or in `../kibo-*/tools/`; else `../kibo/target/kibo-*.jar` |
+| template pack | `KIBO_TEMPLATES`; else `../kibo-<line>/templates`; else `../templates`; else `../kibo-template-viper` |
+
+In the DevKit, this script is `tools/kibo_project.py`, and each generator line sits beside
+`tools/` in its own folder: `kibo-2/tools/kibo-2.*.jar` and `kibo-2/templates/` for
+`templates = "2"`.
 
 The pack is checked against the project's declared line through the version stamped in its
 templates. The jar is the newest at or above the floor the pack declares (`generator.kibo` in

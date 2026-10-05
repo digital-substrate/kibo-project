@@ -173,11 +173,13 @@ def _dotted(version: Version) -> str:
 
 def find_kibo(floor: Version, line: int | None) -> Path:
     """The newest jar at or above the pack's floor, and of the project's line if it pins one:
-    KIBO_JAR, else those beside this tool, else those of a sibling kibo checkout."""
+    KIBO_JAR, else those beside this tool, those of the DevKit's generator lines
+    (../kibo-<line>/tools/), and those of a sibling kibo checkout."""
     if os.environ.get("KIBO_JAR"):
         candidates = [Path(os.environ["KIBO_JAR"])]
     else:
-        candidates = [*HERE.glob("kibo-*.jar"), *(HERE.parent / "kibo" / "target").glob("kibo-*.jar")]
+        candidates = [*HERE.glob("kibo-*.jar"), *HERE.parent.glob("kibo-*/tools/kibo-*.jar"),
+                      *(HERE.parent / "kibo" / "target").glob("kibo-*.jar")]
     eligible: list[tuple[Version, Path]] = []
     for jar in candidates:
         version = _version(jar.name) if re.fullmatch(r"kibo-\d+\.\d+\.\d+\.jar", jar.name) else None
@@ -185,18 +187,21 @@ def find_kibo(floor: Version, line: int | None) -> Path:
             eligible.append((version, jar.resolve()))
     if not eligible:
         wanted = f">={_dotted(floor)}" + (f", line {line}" if line is not None else "")
-        tried = os.environ.get("KIBO_JAR") or f"{HERE}/kibo-*.jar, {HERE.parent}/kibo/target/kibo-*.jar"
+        tried = (os.environ.get("KIBO_JAR")
+                 or f"{HERE}/kibo-*.jar, {HERE.parent}/kibo-*/tools/kibo-*.jar, {HERE.parent}/kibo/target/kibo-*.jar")
         raise ProjectError(f"no kibo jar {wanted} (tried {tried})")
     return max(eligible)[1]
 
 
 def find_templates(line: int) -> Path:
-    """The pack of the required line: KIBO_TEMPLATES, else templates/ beside this tool's
-    folder, else a sibling kibo-template-viper checkout."""
+    """The pack of the required line: KIBO_TEMPLATES, else the DevKit's pack of that line
+    (../kibo-<line>/templates/), else templates/ beside this tool's folder, else a sibling
+    kibo-template-viper checkout."""
     if os.environ.get("KIBO_TEMPLATES"):
         candidates = [Path(os.environ["KIBO_TEMPLATES"])]
     else:
-        candidates = [HERE.parent / "templates", HERE.parent / "kibo-template-viper"]
+        candidates = [HERE.parent / f"kibo-{line}" / "templates", HERE.parent / "templates",
+                      HERE.parent / "kibo-template-viper"]
     for pack in candidates:
         if not (pack / "features.json").is_file():
             continue
