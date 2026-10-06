@@ -240,6 +240,14 @@ class Pack:
         layout: Table = self.manifest.get("layout", {}).get(target, {})
         return layout
 
+    def reserved(self, target: str) -> list[str]:
+        """The names the pack's own code takes in a target, as kibo's arguments: a DSM name spelled
+        as one of them takes a trailing underscore instead of taking its place."""
+        names = self.manifest.get("reserved", {}).get(target, [])
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise ProjectError(f"{self.root / 'features.json'}: reserved.{target} must be a list of names")
+        return [option for name in names for option in ("--reserve", name)]
+
     def _features(self, target: str) -> dict[str, tuple[Table, Path]]:
         features = {name: (spec, self.root / target)
                     for name, spec in self.manifest.get(target, {}).items()}
@@ -390,8 +398,9 @@ def generate_target(project: Project, pack: Pack, jar: Path, dsm: Path, encoded:
         if project.root.is_relative_to(sources):
             raise ProjectError(f"[target.{target.name}] clean would empty {sources}, which holds the project")
         shutil.rmtree(sources, ignore_errors=True)
-    render(jar, target, dsm, [t for t in templates if t.name not in at_root], sources, project.naming)
-    render(jar, target, dsm, [t for t in templates if t.name in at_root], target.output, project.naming)
+    naming = project.naming + pack.reserved(target.language)
+    render(jar, target, dsm, [t for t in templates if t.name not in at_root], sources, naming)
+    render(jar, target, dsm, [t for t in templates if t.name in at_root], target.output, naming)
 
     resources = layout.get("resources")
     if resources and carried(resources):
