@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,6 +52,7 @@ class Target:
     infrastructure: str
     clean: bool = False
     with_requirements: bool = True
+    validate: bool = True
 
 
 @dataclass
@@ -142,6 +144,7 @@ def load_project(path: Path) -> Project:
             infrastructure=str(table.get("infrastructure", infrastructure)),
             clean=bool(table.get("clean", False)),
             with_requirements=bool(table.get("with_requirements", True)),
+            validate=bool(table.get("validate", True)),
         )
     if not project.targets:
         raise ProjectError(f"{path}: no [target.*] section")
@@ -239,6 +242,16 @@ class Pack:
     def layout(self, target: str) -> Table:
         layout: Table = self.manifest.get("layout", {}).get(target, {})
         return layout
+
+    def validation(self, target: str) -> list[Table]:
+        """How the pack's output for a target is checked once generated: commands, the tools they
+        need, and the feature that must be rendered for them to apply."""
+        steps = self.manifest.get("validation", {}).get(target, [])
+        if not isinstance(steps, list) or not all(isinstance(s, dict) and isinstance(s.get("run"), list)
+                                                 for s in steps):
+            raise ProjectError(f"{self.root / 'features.json'}: validation.{target} must be a list of "
+                               "steps, each with a `run` command")
+        return steps
 
     def reserved(self, target: str) -> list[str]:
         """The names the pack's own code takes in a target, as kibo's arguments: a DSM name spelled
@@ -420,6 +433,64 @@ def generate_target(project: Project, pack: Pack, jar: Path, dsm: Path, encoded:
                         ignore=shutil.ignore_patterns(*runtime.get("exclude", [])))
 
 
+# MARK: - Validation
+
+def find_tool(tool: str, start: Path) -> str | None:
+    """Where a tool the pack's validation needs is: the running Python and its modules, or a
+    node tool from the nearest node_modules above the output, else the PATH."""
+    if tool == "python":
+        return sys.executable
+    if tool == "mypy":
+        found = subprocess.run([sys.executable, "-m", "mypy", "--version"], capture_output=True)
+        return sys.executable if found.returncode == 0 else None
+    for directory in (start, *start.parents):
+        candidate = directory / "node_modules" / ".bin" / tool
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which(tool)
+
+
+def validate(project: Project, pack: Pack, target: Target) -> None:
+    """Run what the pack declares to check a target's output. The script targets are silent: a
+    field can mask a method and Python imports the class without a word; a type checker says so.
+    A validation that cannot run is an error, unless the project switches it off."""
+    steps = pack.validation(target.language)
+    if not steps:
+        return
+    if not target.validate:
+        print(f"   validation switched off ([target.{target.name}] validate = false)")
+        return
+    rendered = pack.rendered(project, target)
+    with tempfile.TemporaryDirectory(prefix="kibo-validate-") as tmp:
+        for step in steps:
+            if "with" in step and step["with"] not in rendered:
+                continue
+            name = str(step.get("name", " ".join(map(str, step["run"]))))
+            tools: dict[str, str] = {}
+            for tool in step.get("tools", []):
+                found = find_tool(str(tool), target.output)
+                if found is None:
+                    where = (f"in the Python running kibo-project ({sys.executable})" if tool in ("python", "mypy")
+                             else f"in a node_modules above {target.output}, nor on the PATH")
+                    raise ProjectError(
+                        f"[target.{target.name}] the generated code cannot be validated ({name}): {tool} "
+                        f"is not found {where}. Install it, or switch the validation off with "
+                        f"`validate = false` in [target.{target.name}]")
+                tools[str(tool)] = found
+            fill = {"python": sys.executable, "output": str(target.output), "pack": str(pack.root),
+                    "infrastructure": target.infrastructure, "tmp": tmp, **tools}
+            command = [str(part).format(**fill) for part in step["run"]]
+            env = {**os.environ, **{str(k): str(v).format(**fill) for k, v in step.get("env", {}).items()}}
+            result = subprocess.run(command, cwd=target.output, env=env, capture_output=True, text=True)
+            if result.returncode != 0:
+                lines = (result.stdout + result.stderr).strip().splitlines()
+                shown = "\n".join(f"  {line}" for line in lines[:30])
+                more = f"\n  ... {len(lines) - 30} more lines" if len(lines) > 30 else ""
+                raise ProjectError(f"[target.{target.name}] the generated code does not validate ({name}):\n"
+                                   f"{shown}{more}")
+            print(f"   validated: {name}")
+
+
 def generate(project: Project, only: list[str]) -> None:
     pack = Pack(find_templates(project.templates_line), project.manifests)
     jar = find_kibo(pack.kibo_floor, project.kibo_line)
@@ -434,6 +505,7 @@ def generate(project: Project, only: list[str]) -> None:
     for target in targets:
         print(f"** {target.name} -> {os.path.relpath(target.output, project.workdir)}")
         generate_target(project, pack, jar, dsm, encoded, target)
+        validate(project, pack, target)
 
 
 def plan(project: Project) -> None:

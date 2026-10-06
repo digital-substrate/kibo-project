@@ -14,6 +14,9 @@ the [kibo](https://github.com/digital-substrate/kibo) jar, which renders a templ
    the same run, with kibo 2.0.1 or later; once per template with an older kibo;
 5. writes the embedded definitions in the encoding the pack declares, and copies the pack's
    runtime beside the generated sources.
+6. validates what it wrote, as the pack declares: for the script targets, where a wrong name
+   would otherwise go unnoticed — Python imported, every structure built, `mypy --strict`;
+   TypeScript through `tsc`. A validation that cannot run, its tool missing, is an error.
 
 Every file it writes says where it comes from: kibo's banner names the `.dsm.json`
 relative to the project, the same on every machine, and the embedded definitions open with
@@ -58,6 +61,7 @@ output = "cpp/generated"
 features = ["Base", "Pool", "Wheel"]
 output = "python/generated"
 clean = true                         # optional: empty the sources directory first
+validate = false                     # optional: skip the pack's validation of this target
 ```
 
 Paths are relative to the project file. A target may set its own `infrastructure`.
