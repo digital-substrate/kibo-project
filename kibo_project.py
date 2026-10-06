@@ -350,17 +350,26 @@ def assemble(project: Project) -> tuple[Path, bytes]:
     return path, bytes(definitions.encode().encoded())
 
 
+# The first kibo that renders several templates in one run (`-t` repeated). Before it, each
+# template is a run of its own -- a JVM started for each, which is most of a generation's time.
+KIBO_TEMPLATE_LIST: Version = (2, 0, 1)
+
+
 def render(jar: Path, target: Target, dsm: Path, templates: list[Path], output: Path,
            naming: list[str]) -> None:
     output.mkdir(parents=True, exist_ok=True)
-    for template in templates:
+    version = _version(jar.name)
+    runs = [templates] if version and version >= KIBO_TEMPLATE_LIST else [[t] for t in templates]
+    for run in filter(None, runs):
         # Run beside the .dsm.json, so that the banner kibo writes names it relative to the
         # project, the same on every machine.
+        listed = [option for template in run for option in ("-t", str(template))]
         result = subprocess.run(["java", "-jar", str(jar), "-c", target.language, "-n", target.infrastructure,
-                                 "-d", dsm.name, "-t", str(template), "-o", str(output), *naming],
+                                 "-d", dsm.name, *listed, "-o", str(output), *naming],
                                 cwd=dsm.parent, capture_output=True, text=True)
         if result.returncode != 0:
-            raise ProjectError(f"kibo failed on {template.name}:\n{result.stderr or result.stdout}")
+            what = run[0].name if len(run) == 1 else f"{len(run)} templates for {output.name}"
+            raise ProjectError(f"kibo failed on {what}:\n{result.stderr or result.stdout}")
 
 
 def generate_target(project: Project, pack: Pack, jar: Path, dsm: Path, encoded: bytes, target: Target) -> None:
