@@ -31,7 +31,7 @@ Status: in development, for the kibo 2 line.
 ## Usage
 
 ```bash
-python3 kibo_project.py generate [kibo.toml] [--target NAME ...] [--definitions PATH] [--into DIR]
+python3 kibo_project.py generate [kibo.toml] [--target NAME ...] [--definitions PATH] [--into DIR] [--no-validate]
 python3 kibo_project.py plan     [kibo.toml] [--definitions PATH]
 ```
 
@@ -40,7 +40,8 @@ every template with where it lands, without writing anything. `--definitions` re
 another model than the project's, for one run: a test programme checked against a real
 project's model, for instance. `--into` renders into another directory, each output keeping
 its place relative to the project, and leaves the project untouched: two renderings, before
-and after a change, can then be compared.
+and after a change, can then be compared. `--no-validate` skips the pack's validation of every
+target, for a rendering compared as text rather than run.
 
 ## The project file
 
@@ -109,6 +110,23 @@ atoms = ["IPv4", "YCoCg"]            # never split: IPv4Address -> ipv4_address
 [names.rename]
 "f_E" = "f_enum"                     # a whole name, spelled as written here
 ```
+
+A DSM name is valid in every language or in none, and the model is never changed for one
+target. When a target cannot take a name — a field `class` in C++, which its compiler refuses —
+or a name meets one the pack's own code takes — a field `wrap_value` beside the method every
+generated class has, which kibo refuses, saying so — the project spells it otherwise for that
+target:
+
+```toml
+[names.cpp.rename]
+class = "klass"                      # every C++ identifier for the DSM name `class`
+
+[names.python.rename]
+wrap_value = "wrapped"
+```
+
+The DSM name stays the one sent to the runtime: a C++ client and a Python service still meet on
+the wire. Nothing is renamed without such a line.
 
 ## Where the generator comes from
 

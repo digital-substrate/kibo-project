@@ -69,6 +69,14 @@ class Project:
     # and the names spelled as the author wants (`[names]` in the project file).
     atoms: list[str] = field(default_factory=list)
     renames: dict[str, str] = field(default_factory=dict)
+    # How a target spells a DSM name it cannot take (`[names.<language>.rename]`): every identifier
+    # of that target follows it, the runtime still knows the DSM name.
+    spellings: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def spelling(self, language: str) -> list[str]:
+        """How the target of a language spells names, as kibo's arguments."""
+        return [option for name, spelled in self.spellings.get(language, {}).items()
+                for option in ("--spell", f"{name}={spelled}")]
 
     @property
     def naming(self) -> list[str]:
@@ -157,6 +165,15 @@ def load_project(path: Path) -> Project:
     if not isinstance(renames, dict) or not all(isinstance(v, str) and v for v in renames.values()):
         raise ProjectError(f"{path}: [names.rename] maps a DSM name to the snake_case it takes")
     project.atoms, project.renames = list(atoms), dict(renames)
+    for language in TARGETS:
+        table = names.get(language, {})
+        if not isinstance(table, dict) or set(table) - {"rename"}:
+            raise ProjectError(f"{path}: [names.{language}] holds only a `rename` table")
+        spelled = table.get("rename", {})
+        if not isinstance(spelled, dict) or not all(isinstance(v, str) and v for v in spelled.values()):
+            raise ProjectError(f"{path}: [names.{language}.rename] maps a DSM name to how {language} spells it")
+        if spelled:
+            project.spellings[language] = dict(spelled)
     return project
 
 
@@ -254,12 +271,16 @@ class Pack:
         return steps
 
     def reserved(self, target: str) -> list[str]:
-        """The names the pack's own code takes in a target, as kibo's arguments: a DSM name spelled
-        as one of them takes a trailing underscore instead of taking its place."""
-        names = self.manifest.get("reserved", {}).get(target, [])
-        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
-            raise ProjectError(f"{self.root / 'features.json'}: reserved.{target} must be a list of names")
-        return [option for name in names for option in ("--reserve", name)]
+        """The names the pack's own code takes in a target, per family of names, as kibo's
+        arguments: a DSM name meeting one stops the generation, saying how to spell it otherwise."""
+        families = self.manifest.get("reserved", {}).get(target, {})
+        if not isinstance(families, dict) or not all(
+                isinstance(names, list) and all(isinstance(n, str) for n in names)
+                for kind, names in families.items() if not kind.startswith("_")):
+            raise ProjectError(f"{self.root / 'features.json'}: reserved.{target} maps a family of names "
+                               "(field, namespace...) to the names the pack's code takes")
+        return [option for kind, names in families.items() if not kind.startswith("_")
+                for name in names for option in ("--reserve", f"{kind}:{name}")]
 
     def _features(self, target: str) -> dict[str, tuple[Table, Path]]:
         features = {name: (spec, self.root / target)
@@ -411,7 +432,7 @@ def generate_target(project: Project, pack: Pack, jar: Path, dsm: Path, encoded:
         if project.root.is_relative_to(sources):
             raise ProjectError(f"[target.{target.name}] clean would empty {sources}, which holds the project")
         shutil.rmtree(sources, ignore_errors=True)
-    naming = project.naming + pack.reserved(target.language)
+    naming = project.naming + project.spelling(target.language) + pack.reserved(target.language)
     render(jar, target, dsm, [t for t in templates if t.name not in at_root], sources, naming)
     render(jar, target, dsm, [t for t in templates if t.name in at_root], target.output, naming)
 
@@ -487,7 +508,9 @@ def validate(project: Project, pack: Pack, target: Target) -> None:
                 shown = "\n".join(f"  {line}" for line in lines[:30])
                 more = f"\n  ... {len(lines) - 30} more lines" if len(lines) > 30 else ""
                 raise ProjectError(f"[target.{target.name}] the generated code does not validate ({name}):\n"
-                                   f"{shown}{more}")
+                                   f"{shown}{more}\n"
+                                   f"A DSM name {target.language} cannot take is spelled otherwise for it, the model "
+                                   f"unchanged: [names.{target.language}.rename] <DSM name> = \"...\" in the project file.")
             print(f"   validated: {name}")
 
 
@@ -539,6 +562,8 @@ def main(argv: list[str] | None = None) -> int:
         if name == "generate":
             command.add_argument("--into", type=Path,
                                  help="render into this directory instead, leaving the project untouched")
+            command.add_argument("--no-validate", action="store_true",
+                                 help="skip the pack's validation of every target, saying so")
         command.add_argument("--definitions", type=Path,
                              help="render another model than the project's, a file or a folder of definitions")
     arguments = parser.parse_args(argv)
@@ -549,6 +574,9 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.definitions:
             project.definitions = arguments.definitions.resolve()
         if arguments.command == "generate":
+            if arguments.no_validate:
+                for target in project.targets.values():
+                    target.validate = False
             generate(project, arguments.target)
         else:
             plan(project)
