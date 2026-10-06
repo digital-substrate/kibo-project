@@ -30,7 +30,7 @@ try:
 except ModuleNotFoundError:                                  # Python 3.10
     import tomli as tomllib                                  # type: ignore[no-redef]
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 TARGETS = ("cpp", "python", "typescript")
 HERE = Path(__file__).resolve().parent
 Table = dict[str, Any]
