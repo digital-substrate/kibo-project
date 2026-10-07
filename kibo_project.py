@@ -272,15 +272,19 @@ class Pack:
 
     def reserved(self, target: str) -> list[str]:
         """The names the pack's own code takes in a target, per family of names, as kibo's
-        arguments: a DSM name meeting one stops the generation, saying how to spell it otherwise."""
-        families = self.manifest.get("reserved", {}).get(target, {})
-        if not isinstance(families, dict) or not all(
-                isinstance(names, list) and all(isinstance(n, str) for n in names)
-                for kind, names in families.items() if not kind.startswith("_")):
-            raise ProjectError(f"{self.root / 'features.json'}: reserved.{target} maps a family of names "
-                               "(field, namespace...) to the names the pack's code takes")
-        return [option for kind, names in families.items() if not kind.startswith("_")
-                for name in names for option in ("--reserve", f"{kind}:{name}")]
+        arguments: a DSM name meeting one stops the generation, saying how to spell it otherwise.
+        A project's own manifest reserves the names its own templates take the same way."""
+        options: list[str] = []
+        for path, manifest in [(self.root / "features.json", self.manifest), *self.extra]:
+            families = manifest.get("reserved", {}).get(target, {})
+            if not isinstance(families, dict) or not all(
+                    isinstance(names, list) and all(isinstance(n, str) for n in names)
+                    for kind, names in families.items() if not kind.startswith("_")):
+                raise ProjectError(f"{path}: reserved.{target} maps a family of names "
+                                   "(field, namespace...) to the names the templates' code takes")
+            options += [option for kind, names in families.items() if not kind.startswith("_")
+                        for name in names for option in ("--reserve", f"{kind}:{name}")]
+        return options
 
     def _features(self, target: str) -> dict[str, tuple[Table, Path]]:
         features = {name: (spec, self.root / target)
@@ -509,8 +513,10 @@ def validate(project: Project, pack: Pack, target: Target) -> None:
                 more = f"\n  ... {len(lines) - 30} more lines" if len(lines) > 30 else ""
                 raise ProjectError(f"[target.{target.name}] the generated code does not validate ({name}):\n"
                                    f"{shown}{more}\n"
-                                   f"A DSM name {target.language} cannot take is spelled otherwise for it, the model "
-                                   f"unchanged: [names.{target.language}.rename] <DSM name> = \"...\" in the project file.")
+                                   f"If it names a DSM name {target.language} cannot take, spell that name otherwise, "
+                                   f"the model unchanged: [names.{target.language}.rename] <DSM name> = \"...\" in the "
+                                   f"project file. Otherwise the templates wrote code that does not validate: report "
+                                   f"it to their pack, {pack.root}, with the lines above.")
             print(f"   validated: {name}")
 
 

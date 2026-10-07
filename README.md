@@ -97,6 +97,8 @@ output = "RaptorEditor/RaptorEditor/Scripts"
   sources directory holds the project itself.
 - A project's own manifest follows the pack's format; its templates sit beside it, in
   `<manifest dir>/<target>/`. A feature name the pack already declares is refused.
+  Its `reserved` names — the modules or names its own templates take — are reserved as the
+  pack's are: a DSM name meeting one stops the generation.
 
 How a static name is spelled where kibo projects it to snake_case — a Python field, method,
 parameter or module, the packages' directories — follows one rule (`vec3Curves` →
