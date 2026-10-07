@@ -58,7 +58,7 @@ class Target:
 @dataclass
 class Project:
     path: Path
-    definitions: Path
+    definitions: list[Path]
     infrastructure: str
     templates_line: int
     kibo_line: int | None = None
@@ -133,7 +133,7 @@ def load_project(path: Path) -> Project:
     infrastructure = str(required(project_table, "infrastructure", "[project]"))
     project = Project(
         path=path,
-        definitions=(root / str(required(project_table, "definitions", "[project]"))).resolve(),
+        definitions=[(root / str(d)).resolve() for d in _paths(required(project_table, "definitions", "[project]"))],
         infrastructure=infrastructure,
         templates_line=int(str(required(generator, "templates", "[generator]"))),
         kibo_line=int(str(generator["kibo"])) if "kibo" in generator else None,
@@ -378,14 +378,29 @@ ENCODINGS = {
 
 # MARK: - Generation
 
+def _paths(value: object) -> list[object]:
+    """`definitions` is one file or folder, or a list of them assembled in the order written."""
+    return list(value) if isinstance(value, list) else [value]
+
+
 def assemble(project: Project) -> tuple[Path, bytes]:
     """The DSM as the .dsm.json kibo reads, written beside the project file, and the encoded
     definitions to embed. The file is an intermediate a project does not commit; it is kept so
     that what the banners name exists, and so kibo can be rerun by hand on it."""
     from dsviper import DSMBuilder
-    if not project.definitions.exists():
-        raise ProjectError(f"{project.definitions}: no definitions")
-    report, dsm, definitions = DSMBuilder.assemble(str(project.definitions)).parse()
+    for path in project.definitions:
+        if not path.exists():
+            raise ProjectError(f"{path}: no definitions")
+    if len(project.definitions) == 1:
+        builder = DSMBuilder.assemble(str(project.definitions[0]))
+    else:
+        # Several folders or files, in the order the project writes them; a folder's .dsm files
+        # sorted by path, as DSMBuilder.assemble reads one.
+        builder = DSMBuilder()
+        for path in project.definitions:
+            for file in (sorted(path.glob("*.dsm")) if path.is_dir() else [path]):
+                builder.append(str(file), file.read_text(encoding="utf-8"))
+    report, dsm, definitions = builder.parse()
     if report.has_error():
         raise ProjectError("the definitions do not parse:\n" + "\n".join(f"  {e!r}" for e in report.errors()))
     if dsm is None or definitions is None:
@@ -416,6 +431,11 @@ def render(jar: Path, target: Target, dsm: Path, templates: list[Path], output: 
         if result.returncode != 0:
             what = run[0].name if len(run) == 1 else f"{len(run)} templates for {output.name}"
             raise ProjectError(f"kibo failed on {what}:\n{result.stderr or result.stdout}")
+        if result.stderr.strip():
+            # kibo renders and says what it could not resolve -- a property a template reads
+            # that the model does not have. A run that succeeds still owes it to the author.
+            for line in result.stderr.strip().splitlines():
+                print(f"   {line}")
 
 
 def generate_target(project: Project, pack: Pack, jar: Path, dsm: Path, encoded: bytes, target: Target) -> None:
@@ -542,7 +562,7 @@ def plan(project: Project) -> None:
     jar = find_kibo(pack.kibo_floor, project.kibo_line)
     rendered = {name: pack.rendered(project, target) for name, target in project.targets.items()}
     print(f"project:        {project.path}")
-    print(f"definitions:    {project.definitions}")
+    print(f"definitions:    {', '.join(str(d) for d in project.definitions)}")
     print(f"kibo:           {jar}")
     print(f"templates:      {pack.root}")
     for target in project.targets.values():
@@ -578,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(arguments, "into", None):
             relocate(project, arguments.into)
         if arguments.definitions:
-            project.definitions = arguments.definitions.resolve()
+            project.definitions = [arguments.definitions.resolve()]
         if arguments.command == "generate":
             if arguments.no_validate:
                 for target in project.targets.values():

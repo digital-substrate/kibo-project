@@ -47,7 +47,7 @@ target, for a rendering compared as text rather than run.
 
 ```toml
 [project]
-definitions = "definitions"          # a .dsm file or a directory of them
+definitions = "definitions"          # a .dsm file, a directory of them, or a list of either
 infrastructure = "crossing"          # the name passed to kibo as -n
 
 [generator]
