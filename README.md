@@ -34,6 +34,7 @@ Status: in development, for the kibo 2 line.
 ```bash
 python3 kibo_project.py generate [kibo.toml] [--target NAME ...] [--definitions PATH] [--into DIR] [--no-validate]
 python3 kibo_project.py plan     [kibo.toml] [--definitions PATH]
+python3 kibo_project.py check    [kibo.toml] [--target NAME ...] [--definitions PATH]
 ```
 
 `plan` shows the jar and the pack it found and, per target, the features it renders and
@@ -43,6 +44,13 @@ project's model, for instance. `--into` renders into another directory, each out
 its place relative to the project, and leaves the project untouched: two renderings, before
 and after a change, can then be compared. `--no-validate` skips the pack's validation of every
 target, for a rendering compared as text rather than run.
+
+`check` says whether the outputs in place are what the project generates now, and writes nothing
+in the project: every target is rendered into a scratch directory and compared file by file. It
+exits 0 when they are current; otherwise 1, listing per target each file that differs, is missing,
+or is extra — extra only in a directory the generator owns (`clean`), where it is a file of a type
+the definitions no longer declare. Files that running the code leaves (`__pycache__`, `.mypy_cache`)
+are not compared. The pack's validation does not run: the comparison is of text.
 
 ## The project file
 

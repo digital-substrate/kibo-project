@@ -9,6 +9,7 @@ lands, and how the definitions are embedded, the pack declares in its features.j
 
     kibo_project.py generate [kibo.toml] [--target NAME ...] [--definitions PATH] [--into DIR]
     kibo_project.py plan     [kibo.toml] [--definitions PATH]
+    kibo_project.py check    [kibo.toml] [--target NAME ...] [--definitions PATH]
 
 A project that reads part of a large model names that part in [select]: the attachments it
 reads, and every target is generated from those attachments and what they depend on.
@@ -635,7 +636,7 @@ def validate(project: Project, pack: Pack, target: Target) -> None:
             print(f"   validated: {name}")
 
 
-def generate(project: Project, only: list[str]) -> None:
+def generate(project: Project, only: list[str], validating: bool = True) -> None:
     pack = Pack(find_templates(project.templates_line), project.manifests)
     jar = find_kibo(pack.kibo_floor, project.kibo_line)
     missing = [t for t in only if t not in project.targets]
@@ -651,7 +652,58 @@ def generate(project: Project, only: list[str]) -> None:
     for target in targets:
         print(f"** {target.name} -> {os.path.relpath(target.output, project.workdir)}")
         generate_target(project, pack, jar, dsm, encoded, target, selection)
-        validate(project, pack, target)
+        if validating:
+            validate(project, pack, target)
+
+
+# Written beside the generated files by running them, never by the generator.
+NOT_GENERATED = ("__pycache__", ".mypy_cache", ".DS_Store")
+
+
+def _files(root: Path) -> set[Path]:
+    if not root.is_dir():
+        return set()
+    return {path.relative_to(root) for path in root.rglob("*")
+            if path.is_file() and not any(part in NOT_GENERATED or part.endswith(".pyc") for part in path.parts)}
+
+
+def check(project: Project, only: list[str]) -> bool:
+    """Whether the outputs in place are what the project generates now: every target rendered
+    into a scratch directory, compared file by file. Nothing is written in the project. A file
+    the outputs hold and the generation does not is reported where the generator owns the
+    directory (`clean`); elsewhere it may be the project's own."""
+    targets = only or list(project.targets)
+    in_place = {name: project.targets[name].output for name in targets if name in project.targets}
+    with tempfile.TemporaryDirectory(prefix="kibo-check-") as tmp:
+        scratch = Path(tmp)
+        relocate(project, scratch)
+        pack = Pack(find_templates(project.templates_line), project.manifests)
+        generate(project, only, validating=False)
+        stale = 0
+        for name, output in in_place.items():
+            target = project.targets[name]
+            fresh = _files(target.output)
+            current = _files(output)
+            report: list[str] = []
+            for path in sorted(fresh):
+                if path not in current:
+                    report.append(f"   missing  {path}")
+                elif (target.output / path).read_bytes() != (output / path).read_bytes():
+                    report.append(f"   differs  {path}")
+            if target.clean:
+                sources = pack.layout(target.language).get("sources", "").format(infrastructure=target.infrastructure)
+                owned = Path(sources)
+                for path in sorted(current - fresh):
+                    if sources and path.is_relative_to(owned):
+                        report.append(f"   extra    {path}")
+            where = os.path.relpath(output, project.root)
+            if report:
+                stale += 1
+                print(f"[{name}] {where}: not current")
+                print("\n".join(report))
+            else:
+                print(f"[{name}] {where}: current")
+    return stale == 0
 
 
 def plan(project: Project) -> None:
@@ -682,10 +734,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", action="version", version=f"kibo-project {VERSION}")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name, help_ in (("generate", "render every target, or those named"), ("plan", "show what generate would do")):
+    for name, help_ in (("generate", "render every target, or those named"), ("plan", "show what generate would do"),
+                        ("check", "say whether the outputs in place are current; write nothing")):
         command = commands.add_parser(name, help=help_)
         command.add_argument("project", nargs="?", default="kibo.toml", type=Path)
-        if name == "generate":
+        if name in ("generate", "check"):
             command.add_argument("--target", action="append", default=[], help="a target's name; repeatable")
         if name == "generate":
             command.add_argument("--into", type=Path,
@@ -706,6 +759,8 @@ def main(argv: list[str] | None = None) -> int:
                 for target in project.targets.values():
                     target.validate = False
             generate(project, arguments.target)
+        elif arguments.command == "check":
+            return 0 if check(project, arguments.target) else 1
         else:
             plan(project)
     except ProjectError as error:
