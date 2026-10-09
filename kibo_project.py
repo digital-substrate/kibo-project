@@ -9,11 +9,15 @@ lands, and how the definitions are embedded, the pack declares in its features.j
 
     kibo_project.py generate [kibo.toml] [--target NAME ...] [--definitions PATH] [--into DIR]
     kibo_project.py plan     [kibo.toml] [--definitions PATH]
+
+A project that reads part of a large model names that part in [select]: the attachments it
+reads, and every target is generated from those attachments and what they depend on.
 """
 from __future__ import annotations
 
 import argparse
 import base64
+import difflib
 import json
 import os
 import re
@@ -72,6 +76,9 @@ class Project:
     # How a target spells a DSM name it cannot take (`[names.<language>.rename]`): every identifier
     # of that target follows it, the runtime still knows the DSM name.
     spellings: dict[str, dict[str, str]] = field(default_factory=dict)
+    # The attachments the project reads (`[select]`), as `Namespace::KeyType.identifier`: every
+    # target is generated from them and what they depend on. None generates the whole model.
+    select: list[str] | None = None
 
     def spelling(self, language: str) -> list[str]:
         """How the target of a language spells names, as kibo's arguments."""
@@ -174,7 +181,37 @@ def load_project(path: Path) -> Project:
             raise ProjectError(f"{path}: [names.{language}.rename] maps a DSM name to how {language} spells it")
         if spelled:
             project.spellings[language] = dict(spelled)
+    project.select = load_select(path, data.get("select"))
     return project
+
+
+def load_select(path: Path, table: object) -> list[str] | None:
+    """`[select] attachments`: a list of names, or a file of them (one per line, `#` comments),
+    relative to the project file."""
+    if table is None:
+        return None
+    if not isinstance(table, dict):
+        raise ProjectError(f"{path}: [select] must be a table")
+    others = sorted(set(table) - {"attachments"})
+    if others:
+        raise ProjectError(f"{path}: [select] names attachments only, not {', '.join(others)}: a selection "
+                           "carries the attachments a project reads and the types they depend on; function "
+                           "pools and types read outside any attachment are not selectable")
+    listed = table.get("attachments")
+    if isinstance(listed, str):
+        source = (path.parent / listed).resolve()
+        if not source.is_file():
+            raise ProjectError(f"{path}: [select] attachments names {source}, which does not exist")
+        names = [line.split("#", 1)[0].strip() for line in source.read_text(encoding="utf-8").splitlines()]
+        names = [name for name in names if name]
+    elif isinstance(listed, list) and all(isinstance(name, str) and name for name in listed):
+        names = list(listed)
+    else:
+        raise ProjectError(f"{path}: [select] attachments is a list of names "
+                           "(\"Namespace::KeyType.identifier\"), or the file that lists them")
+    if not names:
+        raise ProjectError(f"{path}: [select] selects nothing; to generate the whole model, remove [select]")
+    return list(dict.fromkeys(names))
 
 
 # MARK: - The generator: kibo and the template pack
@@ -383,10 +420,8 @@ def _paths(value: object) -> list[object]:
     return list(value) if isinstance(value, list) else [value]
 
 
-def assemble(project: Project) -> tuple[Path, bytes]:
-    """The DSM as the .dsm.json kibo reads, written beside the project file, and the encoded
-    definitions to embed. The file is an intermediate a project does not commit; it is kept so
-    that what the banners name exists, and so kibo can be rerun by hand on it."""
+def parse(project: Project) -> tuple[Any, Any]:
+    """The project's DSM and definitions, as dsviper assembles them."""
     from dsviper import DSMBuilder
     for path in project.definitions:
         if not path.exists():
@@ -405,10 +440,68 @@ def assemble(project: Project) -> tuple[Path, bytes]:
         raise ProjectError("the definitions do not parse:\n" + "\n".join(f"  {e!r}" for e in report.errors()))
     if dsm is None or definitions is None:
         raise ProjectError("the definitions parsed to nothing")
+    return dsm, definitions
+
+
+@dataclass
+class Selection:
+    """What [select] keeps of a model: its DSM and definitions, and both models' counts."""
+    dsm: Any
+    definitions: Any
+    kept: dict[str, int]
+    whole: dict[str, int]
+
+
+def counts(dsm: Any) -> dict[str, int]:
+    return {"attachments": len(dsm.attachments()), "concepts": len(dsm.concepts()),
+            "structures": len(dsm.structures()), "enumerations": len(dsm.enumerations())}
+
+
+def select(project: Project, dsm: Any) -> Selection:
+    """The attachments the project names, and what they depend on: dsviper writes them as DSM
+    source, which is parsed again, so the model every target reads is held to the same parse as
+    any other. A name the model does not declare stops everything, before anything is written."""
+    from dsviper import DSMBuilder
+    assert project.select is not None
+    declared = {attachment.identifier(): attachment for attachment in dsm.attachments()}
+    unknown = [name for name in project.select if name not in declared]
+    if unknown:
+        lines = []
+        for name in unknown:
+            identifier = name.rsplit(".", 1)[-1]
+            near = [d for d in declared if d.rsplit(".", 1)[-1] == identifier]
+            near += [d for d in difflib.get_close_matches(name, declared, n=3, cutoff=0.6) if d not in near]
+            lines.append(f"  {name}" + (f" -- declared nearby: {', '.join(near[:4])}" if near else ""))
+        raise ProjectError(f"{project.path}: [select] names {len(unknown)} attachment(s) the model does not "
+                           f"declare (a name is Namespace::KeyType.identifier):\n" + "\n".join(lines))
+    source = dsm.to_dsm(attachments=[declared[name] for name in project.select])
+    builder = DSMBuilder()
+    builder.append(f"{project.infrastructure}.subset.dsm", source)
+    report, kept, definitions = builder.parse()
+    if report.has_error() or kept is None or definitions is None:
+        raise ProjectError("the selection, as dsviper writes it, does not parse:\n"
+                           + "\n".join(f"  {e!r}" for e in report.errors()))
+    return Selection(kept, definitions, counts(kept), counts(dsm))
+
+
+def assemble(project: Project) -> tuple[Path, bytes, Selection | None]:
+    """The DSM as the .dsm.json kibo reads, written beside the project file, and the encoded
+    definitions to embed. The file is an intermediate a project does not commit; it is kept so
+    that what the banners name exists, and so kibo can be rerun by hand on it. A selection is
+    written as `<infrastructure>.subset.dsm.json`, so every banner says it renders a subset."""
+    dsm, definitions = parse(project)
+    selection = select(project, dsm) if project.select is not None else None
+    if selection:
+        dsm, definitions = selection.dsm, selection.definitions
     project.workdir.mkdir(parents=True, exist_ok=True)
-    path = project.workdir / f"{project.infrastructure}.dsm.json"
+    path = project.workdir / f"{project.infrastructure}{'.subset' if selection else ''}.dsm.json"
     path.write_text(dsm.json_encode())
-    return path, bytes(definitions.encode().encoded())
+    return path, bytes(definitions.encode().encoded()), selection
+
+
+def subset_line(selection: Selection) -> str:
+    return (f"a subset of the model: {selection.kept['attachments']} of its "
+            f"{selection.whole['attachments']} attachments, with the types they depend on")
 
 
 # The first kibo that renders several templates in one run (`-t` repeated). Before it, each
@@ -438,7 +531,8 @@ def render(jar: Path, target: Target, dsm: Path, templates: list[Path], output: 
                 print(f"   {line}")
 
 
-def generate_target(project: Project, pack: Pack, jar: Path, dsm: Path, encoded: bytes, target: Target) -> None:
+def generate_target(project: Project, pack: Pack, jar: Path, dsm: Path, encoded: bytes, target: Target,
+                    selection: Selection | None = None) -> None:
     layout = pack.layout(target.language)
     fill = {"infrastructure": target.infrastructure}
     sources = target.output / layout.get("sources", "").format(**fill)
@@ -466,7 +560,8 @@ def generate_target(project: Project, pack: Pack, jar: Path, dsm: Path, encoded:
         if encoding is None:
             raise ProjectError(f"the pack asks for the encoding {resources['encoding']!r}, "
                                f"which this tool does not know ({', '.join(ENCODINGS)})")
-        provenance = f"Generated from {dsm.name} by kibo-project {VERSION}. Do not edit by hand."
+        subset = f", {subset_line(selection)}" if selection else ""
+        provenance = f"Generated from {dsm.name} by kibo-project {VERSION}{subset}. Do not edit by hand."
         (sources / resources["path"].format(**fill)).write_text(
             encoding(encoded, resources, target.infrastructure, provenance))
 
@@ -550,10 +645,12 @@ def generate(project: Project, only: list[str]) -> None:
     for target in targets:
         pack.rendered(project, target)
     print(f"kibo: {jar.name}   templates: {pack.root}")
-    dsm, encoded = assemble(project)
+    dsm, encoded, selection = assemble(project)
+    if selection:
+        print(f"select: {subset_line(selection)}")
     for target in targets:
         print(f"** {target.name} -> {os.path.relpath(target.output, project.workdir)}")
-        generate_target(project, pack, jar, dsm, encoded, target)
+        generate_target(project, pack, jar, dsm, encoded, target, selection)
         validate(project, pack, target)
 
 
@@ -565,6 +662,11 @@ def plan(project: Project) -> None:
     print(f"definitions:    {', '.join(str(d) for d in project.definitions)}")
     print(f"kibo:           {jar}")
     print(f"templates:      {pack.root}")
+    if project.select is not None:
+        selection = select(project, parse(project)[0])
+        print(f"select:         {len(project.select)} attachments named")
+        for kind in selection.whole:
+            print(f"    {kind:<14} {selection.kept[kind]:>6} of {selection.whole[kind]}")
     for target in project.targets.values():
         layout = pack.layout(target.language)
         print(f"[{target.name}] {target.language} -n {target.infrastructure} -> {target.output}")

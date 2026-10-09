@@ -7,7 +7,8 @@ the [kibo](https://github.com/digital-substrate/kibo) jar, which renders a templ
 `kibo_project.py`:
 
 1. assembles the definitions with `dsviper`, into `<infrastructure>.dsm.json` beside the
-   project file (an intermediate: ignore it in version control);
+   project file (an intermediate: ignore it in version control) — or only the attachments the
+   project selects, and what they depend on (`[select]`);
 2. finds the template pack, and the newest kibo jar the pack accepts;
 3. resolves the features into the templates they need, dependencies included;
 4. runs kibo, into the directories the pack declares — once per directory, every template in
@@ -129,6 +130,37 @@ wrap_value = "wrapped"
 
 The DSM name stays the one sent to the runtime: a C++ client and a Python service still meet on
 the wire. Nothing is renamed without such a line.
+
+### A part of the model
+
+A project that reads a few attachments of a large model names them, and every target is
+generated from those attachments and the types they depend on, nothing else:
+
+```toml
+[select]
+attachments = [
+    "Patchwork3D::Surface.geometry",     # Namespace::KeyType.identifier
+    "Patchwork3D::Product.name",
+]
+# or: attachments = "attachments.txt"  -- one name per line, `#` starts a comment
+```
+
+- A name is `Namespace::KeyType.identifier`: an identifier alone is not unique, the same one may
+  be declared on several concepts.
+- dsviper writes the selection as DSM source, which is parsed again: the model every target reads
+  is held to the same parse as any other. Runtime ids are the whole model's, so a program built on
+  the selection opens a database written with the whole model.
+- The embedded definitions are the selection's; the intermediate is
+  `<infrastructure>.subset.dsm.json`, so every generated file's banner says it renders a subset,
+  and the embedded definitions say how much of the model (`46 of its 385 attachments`).
+- `plan` prints the selection's counts (attachments, concepts, structures, enumerations) beside
+  the whole model's.
+- Refused, before anything is written: a name the model does not declare (the refusal lists the
+  declarations nearest to it), an empty selection (remove `[select]` to generate the whole model),
+  and any key but `attachments` — function pools, and types read outside any attachment, are not
+  selectable.
+- A project that reads an attachment it did not select fails to build: the accessor does not
+  exist in C++, the import fails in Python and TypeScript.
 
 ## Where the generator comes from
 
