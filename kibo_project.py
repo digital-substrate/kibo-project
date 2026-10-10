@@ -507,7 +507,7 @@ def subset_line(selection: Selection) -> str:
 
 # The first kibo that renders several templates in one run (`-t` repeated). Before it, each
 # template is a run of its own -- a JVM started for each, which is most of a generation's time.
-KIBO_TEMPLATE_LIST: Version = (2, 0, 1)
+KIBO_TEMPLATE_LIST: Version = (2, 0, 0)
 
 
 def render(jar: Path, target: Target, dsm: Path, templates: list[Path], output: Path,

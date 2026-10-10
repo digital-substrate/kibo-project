@@ -12,7 +12,7 @@ the [kibo](https://github.com/digital-substrate/kibo) jar, which renders a templ
 2. finds the template pack, and the newest kibo jar the pack accepts;
 3. resolves the features into the templates they need, dependencies included;
 4. runs kibo, into the directories the pack declares — once per directory, every template in
-   the same run, with kibo 2.0.1 or later; once per template with an older kibo;
+   the same run, with kibo 2.0.0 or later; once per template with an older kibo;
 5. writes the embedded definitions in the encoding the pack declares, and copies the pack's
    runtime beside the generated sources.
 6. validates what it wrote, as the pack declares: for the script targets, where a wrong name
