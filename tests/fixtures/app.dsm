@@ -1,0 +1,20 @@
+namespace App {5b0d6a1e-7c1f-4d8a-9e43-2f6a1b9c0d11} {
+
+"""Someone who uses the application."""
+concept User;
+
+enum Level {
+  beginner,
+  expert
+};
+
+struct Profile {
+  string name;
+  int64 age;
+  Level level;
+};
+
+attachment<User, Profile> profile;
+attachment<User, string> nickname;
+
+};

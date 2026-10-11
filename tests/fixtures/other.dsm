@@ -1,0 +1,7 @@
+namespace Other {6c1e7b2f-8d2a-4e9b-8f54-3a7b2c0d1e22} {
+
+concept Thing;
+
+attachment<Thing, string> label;
+
+};

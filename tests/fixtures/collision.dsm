@@ -1,0 +1,14 @@
+namespace N {7d2f8c3a-9e3b-4fac-9a65-4b8c3d1e2f33} {
+
+struct A { int64 x; };
+struct B { int64 x; };
+struct C { int64 x; };
+struct A_and_N_B { int64 x; };
+struct B_and_N_C { int64 x; };
+
+struct S {
+  tuple<A_and_N_B, C> p;
+  tuple<A, B_and_N_C> q;
+};
+
+};
